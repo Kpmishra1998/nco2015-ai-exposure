@@ -31,22 +31,36 @@ Chain: US SOC (6-digit) → ISCO-08 minor group (3-digit) → NCO-2015 (3-digit)
 | `AIOE` | Felten, Raj & Seamans (2021), *SMJ* | SOC-2010, ability-based | General AI exposure (standardised; higher = more exposed) |
 | `gpt_beta_human` | Eloundou et al. (2024), *Science* | O*NET-SOC 2019, task-based, human raters | Share of tasks where LLM + tooling halves time (0–1) |
 | `gpt_beta_model` | Eloundou et al. (2024) | Same, GPT-4-rated | As above, model-annotated |
+| `ilo_score` | Gmyrek et al. (2025), ILO WP 140 | ISCO-08 4-digit, task-based, survey + expert + LLM | Mean GenAI automation score (0–1) |
 
 `z_*` columns are z-standardised across the 130 NCO groups (unweighted).
 8-digit O*NET detail codes were averaged to 6-digit SOC before crosswalking.
 
+The ILO index requires no SOC crosswalk: scores are native to ISCO-08 at
+4 digits (Table A1 of WP 140, transcribed) and aggregated to 3-digit minor
+groups by unweighted mean (Bruegel WP 06/2024 convention). Additional ILO
+columns: `ilo_sd_uw` (mean within-occupation task-score SD),
+`ilo_max_gradient` (highest exposure gradient of any constituent 4-digit
+occupation, from Not Exposed through Gradient 4), `ilo_high_grad_share`
+(share of constituent 4-digit occupations in Gradients 3–4), and
+`n_isco4_ilo` (constituent occupation count). The gradient columns permit a
+categorical "high exposure" definition independent of the continuous score.
+
 ## Diagnostics
 
-- Spearman rank correlations between weighted measures: 0.90–0.93,
-  consistent with cross-index correlations reported for the EU (Bruegel WP
-  06/2024: 0.78–0.82 between AIOE and the ILO index).
+- Spearman rank correlations: 0.90–0.93 between the two US-based weighted
+  measures; 0.81–0.83 between each US-based measure and the ILO index —
+  almost exactly the 0.78–0.82 range Bruegel WP 06/2024 reports for the EU,
+  a useful external validity check.
 - Face validity: most exposed groups are 264 (authors/journalists),
   212 (mathematicians/statisticians), 422 (client information workers);
   least exposed are 634, 931, 911 (subsistence fishers, construction
   labourers, domestic cleaners).
 - Missing: AIOE absent for 011/021/031 (armed forces; typically excluded
   from PLFS analysis) and 951 (street services). Eloundou absent for
-  011/021 only.
+  011/021 only. ILO index absent for 011/021/031 (armed forces excluded
+  from WP 140 for lack of task descriptions); all 427 published 4-digit
+  occupations matched.
 
 ## Merging with PLFS
 
@@ -76,7 +90,8 @@ match rate in your data appendix.
 
 ## Replication
 
-`build_nco_exposure.py` rebuilds the CSV from public sources:
+`build_nco_exposure.py` rebuilds the SOC-based columns from public sources,
+and `add_ilo_index.py` appends the ILO WP 140 columns:
 
 - github.com/AIOE-Data/AIOE (`AIOE_DataAppendix.xlsx`)
 - github.com/openai/GPTs-are-GPTs (`data/occ_level.csv`,
@@ -90,8 +105,13 @@ repositories (cloned) and the AIOE workbook under `raw/` and run
 
 ## To add next (not in this build)
 
-- **ILO 2025 refined GenAI index** (Gmyrek et al., ILO WP 140): supplementary
-  data at ilo.org provides ISCO-08 4-digit scores and exposure gradients —
-  merge at 4 digits, aggregate to 3 as above. This is the index most
-  defensible for developing-country application.
 - **Webb (2020) AI patent exposure** for a pre-GenAI placebo.
+
+## Provenance note on the ILO index
+
+The ILO did not publish a machine-readable file with WP 140; the 4-digit
+scores in `raw/ilo_wp140_tableA1.tsv` were transcribed from Appendix
+Table A1 of the working paper (PDF). `add_ilo_index.py` aggregates and
+merges them. Before publication, verify the transcription against the PDF
+or request the official score file from the authors (Research Department,
+ILO).
