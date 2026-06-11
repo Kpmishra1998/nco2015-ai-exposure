@@ -1,0 +1,63 @@
+"""
+Add ILO WP140 (Gmyrek et al. 2025) GenAI exposure scores to the NCO-2015
+3-digit crosswalk.
+
+Input: ilo_wp140_tableA1.tsv — Table A1 of ILO Working Paper 140, transcribed.
+ISCO-08 4-digit mean automation scores, SDs, and exposure gradients.
+
+Aggregation to 3-digit: unweighted mean of 4-digit scores within each minor
+group (Bruegel WP06/2024 convention; no global employment shares at 4-digit
+are needed for our use). Gradient summarised as (a) the maximum gradient of
+any 4-digit occupation in the group and (b) the share of 4-digit occupations
+in Gradients 3-4 ("high exposure" share).
+"""
+
+import pandas as pd
+import numpy as np
+
+GRAD_ORDER = {"Not Exposed": 0, "Minimal Exposure": 1, "Gradient 1": 2,
+              "Gradient 2": 3, "Gradient 3": 4, "Gradient 4": 5}
+GRAD_LABEL = {v: k for k, v in GRAD_ORDER.items()}
+
+ilo = pd.read_csv("raw/ilo_wp140_tableA1.tsv", sep="\t")
+ilo["code4"] = ilo["code4"].astype(str).str.zfill(4)
+ilo["isco3"] = ilo["code4"].str[:3]
+ilo["grad_num"] = ilo["Exposure"].map(GRAD_ORDER)
+assert ilo["grad_num"].notna().all(), "Unmapped gradient label present"
+print(f"ILO Table A1: {len(ilo)} 4-digit occupations, "
+      f"{ilo.isco3.nunique()} ISCO 3-digit groups")
+print("By gradient:", ilo["Exposure"].value_counts().to_dict())
+
+agg = (ilo.groupby("isco3")
+          .agg(ilo_score_uw=("mean", "mean"),
+               ilo_sd_uw=("sd", "mean"),
+               ilo_max_gradient_num=("grad_num", "max"),
+               ilo_high_grad_share=("grad_num", lambda g: (g >= 4).mean()),
+               n_isco4_ilo=("code4", "nunique"))
+          .reset_index())
+agg["ilo_max_gradient"] = agg["ilo_max_gradient_num"].map(GRAD_LABEL)
+agg["z_ilo_score_uw"] = ((agg["ilo_score_uw"] - agg["ilo_score_uw"].mean())
+                         / agg["ilo_score_uw"].std())
+
+xw = pd.read_csv("nco2015_ai_exposure_3digit.csv", dtype={"nco2015_3d": str})
+out = xw.merge(agg.rename(columns={"isco3": "nco2015_3d"}),
+               on="nco2015_3d", how="outer", indicator=True)
+print("\nMerge:", out["_merge"].value_counts().to_dict())
+print("In ILO only (no SOC-based scores):",
+      out.loc[out._merge == "right_only", "nco2015_3d"].tolist())
+print("In SOC-based file only (no ILO):",
+      out.loc[out._merge == "left_only", "nco2015_3d"].tolist())
+out = out.drop(columns=["_merge", "ilo_max_gradient_num"])
+out = out.sort_values("nco2015_3d")
+out.to_csv("nco2015_ai_exposure_3digit.csv", index=False, float_format="%.4f")
+
+both = out.dropna(subset=["ilo_score_uw", "AIOE_w", "gpt_beta_human_w"])
+print(f"\nGroups with all three indices: {len(both)}")
+print("Spearman rank correlations:")
+print(both[["AIOE_w", "gpt_beta_human_w", "ilo_score_uw"]]
+      .corr(method="spearman").round(3).to_string())
+
+print("\nTOP 10 by ILO score:")
+print(out.nlargest(10, "ilo_score_uw")
+      [["nco2015_3d", "isco_label", "ilo_score_uw", "ilo_max_gradient",
+        "gpt_beta_human_w"]].to_string(index=False))
