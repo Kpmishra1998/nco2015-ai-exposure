@@ -1,0 +1,154 @@
+"""
+Build an NCO-2015 3-digit AI exposure crosswalk for use with Indian PLFS data.
+
+Chain: US SOC (6-digit) --[BLS official crosswalk]--> ISCO-08 minor group (3-digit)
+       --[identity, by construction of NCO-2015]--> NCO-2015 division group (3-digit)
+
+Exposure measures attached:
+  1. Felten, Raj & Seamans (2021) AIOE          [SOC-2010 basis]
+  2. Eloundou et al. (2024) "GPTs are GPTs"     [O*NET-SOC 2019 / SOC-2018 basis]
+     - beta measure, both human and GPT-4 ("dv") ratings
+
+Weighting: BLS OEWS May 2021 national employment (TOT_EMP) at detailed SOC level.
+Unweighted means also reported as robustness columns.
+
+Sources (all public):
+  - github.com/AIOE-Data/AIOE                    (AIOE_DataAppendix.xlsx)
+  - github.com/openai/GPTs-are-GPTs              (occ_level.csv, national_May2021_dl.csv)
+  - github.com/eworx-org/iscoCrosswalks          (BLS ISCO-08 <-> SOC-2010 crosswalk,
+                                                  O*NET 2010->2018 SOC crosswalk)
+"""
+
+import pandas as pd
+import numpy as np
+import pyreadr
+
+RAW = "raw"
+pd.set_option("display.width", 200)
+
+# ----------------------------------------------------------------------------
+# 1. BLS ISCO-08 (3-digit) <-> SOC-2010 (6-digit) crosswalk
+# ----------------------------------------------------------------------------
+xw = pyreadr.read_r(f"{RAW}/iscoCrosswalks/data/isco08_soc10.rda")["isco08_soc10"]
+xw = xw.rename(columns={"isco08": "isco3", "soc10": "soc10"})
+xw["soc10"] = xw["soc10"].astype(str).str.zfill(6)
+xw["isco3"] = xw["isco3"].astype(str).str.zfill(3)
+xw["isco_label"] = xw["isco_label"].apply(
+    lambda s: s.encode("latin-1", "ignore").decode("utf-8", "ignore") if isinstance(s, str) else s)
+isco_labels = xw[["isco3", "isco_label"]].drop_duplicates("isco3").set_index("isco3")["isco_label"]
+print(f"[1] BLS crosswalk: {len(xw)} SOC-ISCO pairs, "
+      f"{xw.isco3.nunique()} ISCO minor groups, {xw.soc10.nunique()} SOC-2010 codes")
+
+# ----------------------------------------------------------------------------
+# 2. OEWS May 2021 national employment by detailed SOC (SOC-2018 basis)
+# ----------------------------------------------------------------------------
+oews = pd.read_csv(f"{RAW}/GPTs-are-GPTs/data/national_May2021_dl.csv",
+                   encoding="utf-8-sig", low_memory=False)
+oews = oews[oews["O_GROUP"] == "detailed"].copy()
+oews["soc"] = oews["OCC_CODE"].str.replace("-", "", regex=False)
+oews["emp"] = pd.to_numeric(oews["TOT_EMP"].astype(str).str.replace(",", ""), errors="coerce")
+oews = oews.groupby("soc", as_index=False)["emp"].sum()
+print(f"[2] OEWS: {len(oews)} detailed SOC-2018 codes, total emp {oews.emp.sum():,.0f}")
+
+# ----------------------------------------------------------------------------
+# 3. Felten AIOE (SOC-2010 6-digit)
+# ----------------------------------------------------------------------------
+felten = pd.read_excel(f"{RAW}/AIOE_DataAppendix.xlsx", sheet_name="Appendix A")
+felten["soc10"] = felten["SOC Code"].str.replace("-", "", regex=False).str.zfill(6)
+felten = felten[["soc10", "AIOE"]]
+print(f"[3] Felten AIOE: {len(felten)} SOC-2010 codes")
+
+# ----------------------------------------------------------------------------
+# 4. Eloundou et al. exposure (O*NET-SOC 2019 -> SOC-2018 6-digit -> SOC-2010)
+# ----------------------------------------------------------------------------
+gpt = pd.read_csv(f"{RAW}/GPTs-are-GPTs/data/occ_level.csv")
+gpt["soc18"] = gpt["O*NET-SOC Code"].str[:7].str.replace("-", "", regex=False)
+# Average the 8-digit O*NET detail codes up to 6-digit SOC-2018
+gpt = (gpt.groupby("soc18", as_index=False)
+          [["human_rating_beta", "dv_rating_beta"]].mean()
+          .rename(columns={"human_rating_beta": "gpt_beta_human",
+                           "dv_rating_beta": "gpt_beta_model"}))
+print(f"[4] Eloundou: {len(gpt)} SOC-2018 codes")
+
+# SOC-2018 -> SOC-2010 via O*NET's published 2010->2018 crosswalk (inverted).
+s1018 = pd.read_excel(
+    f"{RAW}/iscoCrosswalks/data-raw/onet_classification/OccupationalListings/"
+    f"Crosswalks/2010_to_2018_SOC_Crosswalk.xlsx", skiprows=3)
+s1018.columns = [str(c).strip() for c in s1018.columns]
+c2010 = [c for c in s1018.columns if "2010" in c and "Code" in c][0]
+c2018 = [c for c in s1018.columns if "2018" in c and "Code" in c][0]
+s1018 = s1018[[c2010, c2018]].dropna()
+# O*NET-SOC 2010 codes are 8-digit (11-1011.00); truncate to 6-digit SOC-2010
+s1018["soc10"] = (s1018[c2010].astype(str).str[:7]
+                  .str.replace("-", "", regex=False).str.zfill(6))
+s1018["soc18"] = s1018[c2018].astype(str).str.replace("-", "", regex=False).str.zfill(6)
+s1018 = s1018[["soc10", "soc18"]].drop_duplicates()
+print(f"[4b] SOC 2010<->2018 crosswalk: {len(s1018)} pairs")
+
+# Map Eloundou scores onto SOC-2010: where one soc10 maps to several soc18, average.
+gpt10 = (s1018.merge(gpt, on="soc18", how="inner")
+              .groupby("soc10", as_index=False)
+              [["gpt_beta_human", "gpt_beta_model"]].mean())
+
+# Employment weights on the SOC-2010 frame: OEWS is SOC-2018-coded; carry employment
+# back through the same crosswalk (split equally across multiple soc10 parents).
+emp18 = s1018.merge(oews, left_on="soc18", right_on="soc", how="left")
+emp18["n_parents"] = emp18.groupby("soc18")["soc10"].transform("nunique")
+emp18["emp_split"] = emp18["emp"] / emp18["n_parents"]
+emp10 = emp18.groupby("soc10", as_index=False)["emp_split"].sum().rename(columns={"emp_split": "emp"})
+
+# ----------------------------------------------------------------------------
+# 5. Assemble SOC-2010 level file, then aggregate to ISCO-08 3-digit
+# ----------------------------------------------------------------------------
+soc = (felten.merge(gpt10, on="soc10", how="outer")
+             .merge(emp10, on="soc10", how="left"))
+soc["emp"] = soc["emp"].fillna(0)
+
+merged = xw.merge(soc, on="soc10", how="left")
+
+def agg_isco(g):
+    out = {}
+    for v in ["AIOE", "gpt_beta_human", "gpt_beta_model"]:
+        x = g[[v, "emp"]].dropna(subset=[v])
+        out[f"{v}_uw"] = x[v].mean() if len(x) else np.nan
+        w = x["emp"].sum()
+        out[f"{v}_w"] = np.average(x[v], weights=x["emp"]) if (len(x) and w > 0) else out[f"{v}_uw"]
+        out[f"n_soc_{v}"] = len(x)
+    out["n_soc_total"] = g["soc10"].nunique()
+    out["us_emp"] = g["emp"].sum()
+    return pd.Series(out)
+
+isco = merged.groupby("isco3").apply(agg_isco, include_groups=False).reset_index()
+isco["isco_label"] = isco["isco3"].map(isco_labels)
+
+# ----------------------------------------------------------------------------
+# 6. ISCO-08 3-digit == NCO-2015 3-digit (by construction of NCO-2015).
+#    Standardise exposure scores (z) over ISCO groups, weighted columns.
+# ----------------------------------------------------------------------------
+isco = isco.rename(columns={"isco3": "nco2015_3d"})
+for v in ["AIOE_w", "AIOE_uw", "gpt_beta_human_w", "gpt_beta_human_uw",
+          "gpt_beta_model_w", "gpt_beta_model_uw"]:
+    isco[f"z_{v}"] = (isco[v] - isco[v].mean()) / isco[v].std()
+
+cols = (["nco2015_3d", "isco_label", "n_soc_total", "us_emp"]
+        + [c for c in isco.columns if c.startswith(("AIOE", "gpt", "z_", "n_soc_"))
+           and c != "n_soc_total"])
+isco = isco[cols].sort_values("nco2015_3d")
+isco.to_csv("nco2015_ai_exposure_3digit.csv", index=False, float_format="%.4f")
+
+# ----------------------------------------------------------------------------
+# 7. Diagnostics
+# ----------------------------------------------------------------------------
+print(f"\n[5] Output: {len(isco)} NCO-2015 3-digit groups")
+print(f"    Missing AIOE: {isco.AIOE_w.isna().sum()}, "
+      f"missing Eloundou: {isco.gpt_beta_human_w.isna().sum()}")
+corr = isco[["AIOE_w", "gpt_beta_human_w", "gpt_beta_model_w"]].corr(method="spearman")
+print("\nSpearman rank correlations (weighted scores):")
+print(corr.round(3).to_string())
+
+print("\nTOP 10 most exposed (Eloundou human beta, weighted):")
+print(isco.nlargest(10, "gpt_beta_human_w")[["nco2015_3d", "isco_label", "gpt_beta_human_w", "AIOE_w"]]
+      .to_string(index=False))
+print("\nBOTTOM 10 least exposed:")
+print(isco.nsmallest(10, "gpt_beta_human_w")[["nco2015_3d", "isco_label", "gpt_beta_human_w", "AIOE_w"]]
+      .to_string(index=False))
