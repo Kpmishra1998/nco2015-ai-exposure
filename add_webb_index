@@ -1,0 +1,117 @@
+"""
+Add Webb (2020) patent-based AI exposure scores to the NCO-2015 3-digit
+crosswalk.
+
+Chain: occ1990dd (Dorn/Deming Census schema) --[Webb's own crosswalk]-->
+       O*NET-SOC detailed --[truncation]--> SOC-2010 6-digit
+       --[BLS crosswalk, same as build_nco_exposure.py]--> ISCO-08 minor
+       group (3-digit) --[identity]--> NCO-2015 division group (3-digit)
+
+Webb's public data (michaelwebb.co) is released at the occ1990dd level,
+not SOC, so this script first broadcasts occ1990dd-level scores onto every
+O*NET-SOC code that maps to it via Webb's own published crosswalk, then
+reuses the SOC->ISCO->NCO-2015 pipeline from build_nco_exposure.py.
+
+Weighting: Webb's own labor-supply weight (lswt2010, ACS 2010 FTE), since
+Webb's public data does not carry OEWS employment weights. This differs
+from the OEWS-based weighting used for AIOE/Eloundou in
+build_nco_exposure.py -- noted as a methodological difference in the paper.
+
+Sources (all public):
+  - michaelwebb.co (Webb 2020 exposure_by_occ1990dd_lswt2010.csv,
+    onet_to_occ1990dd_crosswalk.dta)
+  - github.com/eworx-org/iscoCrosswalks (BLS ISCO-08 <-> SOC-2010 crosswalk,
+    same source as build_nco_exposure.py)
+"""
+
+import pandas as pd
+import numpy as np
+import pyreadr
+
+RAW = "raw"
+pd.set_option("display.width", 200)
+
+# ----------------------------------------------------------------------------
+# 1. Webb's occ1990dd-level exposure scores
+# ----------------------------------------------------------------------------
+webb = pd.read_csv(f"{RAW}/webb_occ1990dd_exposure.csv")
+print(f"[1] Webb occ1990dd exposure: {len(webb)} occupations, "
+      f"{webb.pct_ai.notna().sum()} with non-missing AI score")
+
+# ----------------------------------------------------------------------------
+# 2. Webb's own crosswalk: onetsoccode -> occ1990dd
+# ----------------------------------------------------------------------------
+xwalk = pyreadr.read_r(f"{RAW}/webb_onetsoccode_crosswalk.dta")
+xwalk = list(xwalk.values())[0] if isinstance(xwalk, dict) else xwalk
+xwalk = xwalk[["onetsoccode", "occ1990dd"]].dropna()
+print(f"[2] Webb crosswalk: {len(xwalk)} onetsoccode -> occ1990dd pairs, "
+      f"{xwalk.occ1990dd.nunique()} unique occ1990dd")
+
+# Broadcast occ1990dd-level scores onto every onetsoccode that maps to it
+merged = xwalk.merge(webb[["occ1990dd", "lswt2010", "pct_software",
+                            "pct_robot", "pct_ai"]], on="occ1990dd", how="left")
+n_unmatched = merged.pct_ai.isna().sum()
+print(f"    Unmatched onetsoccode (no Webb score): {n_unmatched} "
+      f"({merged.loc[merged.pct_ai.isna(), 'occ1990dd'].unique().tolist()})")
+merged = merged.dropna(subset=["pct_ai"])
+
+# ----------------------------------------------------------------------------
+# 3. onetsoccode -> SOC-2010 6-digit (truncation)
+# ----------------------------------------------------------------------------
+merged["soc10"] = (merged["onetsoccode"].str.replace("-", "", regex=False)
+                    .str.split(".").str[0].str.zfill(6))
+
+# ----------------------------------------------------------------------------
+# 4. SOC-2010 -> ISCO-08 3-digit, same BLS crosswalk as build_nco_exposure.py
+# ----------------------------------------------------------------------------
+xw = pyreadr.read_r(f"{RAW}/iscoCrosswalks/data/soc10_isco08.rda")["soc10_isco08"]
+xw["soc10"] = xw["soc10"].astype(str).str.zfill(6)
+xw["isco08"] = xw["isco08"].astype(str).str.zfill(4)
+xw["isco3"] = xw["isco08"].str[:3]
+
+out = merged.merge(xw[["soc10", "isco3", "isco_label"]], on="soc10", how="left")
+n_unmatched_isco = out.isco3.isna().sum()
+print(f"[3] SOC->ISCO match: {(out.isco3.notna()).sum()}/{len(out)} "
+      f"({n_unmatched_isco} unmatched)")
+out = out.dropna(subset=["isco3"])
+
+# ----------------------------------------------------------------------------
+# 5. Aggregate to ISCO-08 3-digit == NCO-2015 3-digit, weighted by lswt2010
+# ----------------------------------------------------------------------------
+def agg_group(g):
+    w = g["lswt2010"]
+    out = {}
+    for v in ["pct_ai", "pct_software", "pct_robot"]:
+        out[f"webb_{v.split('_')[1]}_w"] = np.average(g[v], weights=w)
+        out[f"webb_{v.split('_')[1]}_uw"] = g[v].mean()
+    out["isco_label_webb"] = g["isco_label"].iloc[0]
+    out["n_soc_webb"] = g["onetsoccode"].nunique()
+    out["us_emp_webb"] = w.sum()
+    return pd.Series(out)
+
+agg = out.groupby("isco3").apply(agg_group, include_groups=False).reset_index()
+agg = agg.rename(columns={"isco3": "nco2015_3d"})
+
+for v in ["webb_ai_w", "webb_ai_uw", "webb_software_w", "webb_robot_w"]:
+    agg[f"z_{v}"] = (agg[v] - agg[v].mean()) / agg[v].std()
+
+# ----------------------------------------------------------------------------
+# 6. Merge onto the master crosswalk
+# ----------------------------------------------------------------------------
+master = pd.read_csv("output/nco2015_ai_exposure_3digit.csv", dtype={"nco2015_3d": str})
+final = master.merge(agg, on="nco2015_3d", how="outer", indicator=True)
+print("\nMerge onto master crosswalk:", final["_merge"].value_counts().to_dict())
+print("Master-only (no Webb score):",
+      final.loc[final._merge == "left_only", "nco2015_3d"].tolist())
+final = final.drop(columns=["_merge"]).sort_values("nco2015_3d")
+final.to_csv("output/nco2015_ai_exposure_3digit.csv", index=False, float_format="%.4f")
+
+# ----------------------------------------------------------------------------
+# 7. Diagnostics
+# ----------------------------------------------------------------------------
+print(f"\n[4] Output: {len(agg)} NCO-2015 3-digit groups with a Webb score "
+      f"(of {len(master)} total)")
+both = final.dropna(subset=["z_webb_ai_w", "z_AIOE_w"])
+print(f"Groups with both Webb and AIOE: {len(both)}")
+print("Spearman correlation (Webb vs AIOE):",
+      both[["z_webb_ai_w", "z_AIOE_w"]].corr(method="spearman").iloc[0, 1].round(3))
