@@ -10,8 +10,9 @@ Occupations (NCO-2015) at the 3-digit level, for merging with PLFS microdata.
 | `nco2015_ai_exposure_3digit.csv` | 130 rows, one per NCO-2015 3-digit group: AIOE, GPT exposure (human- and model-rated), and ILO GenAI index |
 | `webb_exposure_nco2015_3digit.csv` | 126 rows: Webb (2020) patent-based AI, software, and robot exposure |
 | `ilo_wp140_tableA1.tsv` | ILO WP 140 4-digit scores, transcribed from Appendix Table A1 |
-| `build_nco_exposure.py` | Rebuilds the SOC-based columns from public sources |
-| `add_ilo_index.py` | Aggregates the ILO 4-digit scores and appends them |
+| `build_nco_exposure.py` | Rebuilds the SOC-based columns (AIOE, GPT exposure) from public sources |
+| `add_ilo_index.py` | Aggregates the ILO 4-digit scores to NCO-2015 3-digit groups and appends them |
+| `add_webb_index.py` | Builds the Webb (2020) exposure file through the same SOC → ISCO-08 → NCO-2015 chain |
 
 Merge key in both CSV files: `nco2015_3d`.
 
@@ -100,8 +101,13 @@ ISCO-88 → ISCO-08 correspondence before merging.
 
 ## Replication
 
-`build_nco_exposure.py` rebuilds the SOC-based columns and `add_ilo_index.py`
-appends the ILO columns. Sources:
+Run the three scripts in order:
+
+1. `python3 build_nco_exposure.py` rebuilds the SOC-based columns.
+2. `python3 add_ilo_index.py` appends the ILO WP 140 columns.
+3. `python3 add_webb_index.py` builds `webb_exposure_nco2015_3digit.csv`.
+
+Sources:
 
 - github.com/AIOE-Data/AIOE (`AIOE_DataAppendix.xlsx`)
 - github.com/openai/GPTs-are-GPTs (`data/occ_level.csv`,
@@ -111,8 +117,8 @@ appends the ILO columns. Sources:
 - Webb (2020) occupation-level exposure scores, as published with the paper
 
 Dependencies: `pandas`, `numpy`, `pyreadr`, `openpyxl`. Place the cloned
-repositories and the AIOE workbook in a `raw/` folder and run
-`python3 build_nco_exposure.py`, then `python3 add_ilo_index.py`.
+repositories, the AIOE workbook, and the Webb source files in a `raw/`
+folder before running the scripts.
 
 ## Provenance of the ILO index
 
